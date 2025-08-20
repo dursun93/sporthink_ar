@@ -30,8 +30,6 @@ sales_with_segment['product_att_02'] = sales_with_segment['product_att_02'].appl
 sales_with_segment['product_att_02'] = pd.to_numeric(sales_with_segment['product_att_02'], errors='coerce')
 
 
-
-
 # Store clustering
 cluster = pd.read_csv('k_means_store.csv')
 sales_with_segment = sales_with_segment.merge(cluster, on='store_code', how='left')
