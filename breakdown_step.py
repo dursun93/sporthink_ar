@@ -13,12 +13,8 @@ future_forecast = pd.read_csv(
     thousands="."      
 )
 
-
 sales['date'] = pd.to_datetime(sales['date'])
-
-last_date =  sales['date'].max()
-
-# Bu yıl: son 4 hafta
+last_date = sales['date'].max()
 cutoff_this_year = last_date - timedelta(weeks=8)
 sales = sales[sales['date'] >= cutoff_this_year]
 
@@ -32,7 +28,7 @@ sales.loc[sales['net_quantity'] < 0, 'net_quantity'] = 0
 
 sales = sales.merge(calendar[['date', 'week_start_date']], on='date', how='left')
 
-product=product[['product_code','product_att_01', 'product_att_02', 'product_att_05']].drop_duplicates() #
+product=product[['product_code','product_att_01', 'product_att_02', 'product_att_05']].drop_duplicates()
 sales = sales.merge(product, left_on="stok_kodu",
     right_on="product_code", how='left')
 
@@ -53,13 +49,12 @@ sales = sales[
 
 
 store_ratio_df = (
-    sales.groupby(['store_cluster', 'product_att_01', 'product_att_02', 'product_att_05', 'store_code','stok_kodu'], as_index=False)['net_quantity'] #
+    sales.groupby(['store_cluster', 'product_att_01', 'product_att_02', 'product_att_05', 'store_code','stok_kodu'], as_index=False)['net_quantity']
     .sum()
     .rename(columns={'net_quantity': 'net_quantity'})
 )
 
-
-store_ratio_df['cluster_total'] = store_ratio_df.groupby(['store_cluster', 'product_att_01', 'product_att_02', 'product_att_05'])['net_quantity'].transform('sum') #, 'product_att_05'
+store_ratio_df['cluster_total'] = store_ratio_df.groupby(['store_cluster', 'product_att_01', 'product_att_02', 'product_att_05'])['net_quantity'].transform('sum')
 store_ratio_df['store_ratio'] = store_ratio_df['net_quantity'] / store_ratio_df['cluster_total']
 
 
@@ -68,7 +63,7 @@ store_ratio_df['store_ratio'] = store_ratio_df['net_quantity'] / store_ratio_df[
 future_forecast['week_start_date'] = pd.to_datetime(future_forecast['week_start_date'])
 
 
-merge_keys = ['store_cluster', 'product_att_01', 'product_att_02' , 'product_att_05']  #, 'product_att_05'
+merge_keys = ['store_cluster', 'product_att_01', 'product_att_02' , 'product_att_05']
 for col in merge_keys:
     future_forecast[col] = future_forecast[col].astype(int)
     store_ratio_df[col] = store_ratio_df[col].astype(int)
@@ -87,7 +82,6 @@ final_forecast = forecast_store[[
 
 final_forecast['store_predicted_quantity'] = final_forecast['store_predicted_quantity'].fillna(0).astype(float)
 final_forecast["store_predicted_quantity"] = final_forecast["store_predicted_quantity"].astype(float)
-#final_forecast.to_csv("output/breakdown_store.csv", sep=";", index=False, encoding="utf-8-sig")  # 6 ondalık
 
 final_forecast.to_csv(
     "output/breakdown_store.csv",

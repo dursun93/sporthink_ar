@@ -3,39 +3,47 @@ import logging
 import numpy as np
 import pandas as pd
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
+from airflow.providers.mysql.hooks.mysql import MySqlHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 
 BUCKET = "europe-west1-airflow-a054c263-bucket"
 BASE_PREFIX = "demand_forecasting"
-INPUT_DIRS = [f"{BASE_PREFIX}/input", f"{BASE_PREFIX}/input_parquet"]  # input öncelikli
+INPUT_DIRS = [f"{BASE_PREFIX}/input"]
 OUTPUT_PREFIX = f"{BASE_PREFIX}/output"
 DEFAULT_PREP_INPUT = f"{OUTPUT_PREFIX}/weekly_sales_with_cluster_125.parquet"
 FEATURE_OUTPUT_OBJ = f"{OUTPUT_PREFIX}/weekly_sales_with_features.parquet"
 
 def _pick_parquet_engine():
     try:
-        import pyarrow  # noqa: F401
+        import pyarrow  
         return "pyarrow"
     except Exception:
         try:
-            import fastparquet  # noqa: F401
+            import fastparquet  
             return "fastparquet"
         except Exception:
-            raise ImportError("Parquet için pyarrow veya fastparquet kurulu olmalı (pyarrow>=12 önerilir).")
+            raise ImportError("pyarrow veya fastparquet hatası")
 
 ENGINE = _pick_parquet_engine()
 
-def _download_first_found(gcs: GCSHook, filename: str, local_path: str) -> str:
-    last_err = None
-    for pref in INPUT_DIRS:
-        obj = f"{pref}/{filename}"
+def _fetch_from_db(conn_id: str, query: str) -> pd.DataFrame:
+    """Fetch data from database using the specified connection and query"""
+    try:
+        # Try MySQL first
+        hook = MySqlHook(mysql_conn_id=conn_id)
+        df = hook.get_pandas_df(query)
+        logging.info(f"Successfully fetched data from MySQL using connection: {conn_id}")
+        return df
+    except Exception as mysql_err:
         try:
-            gcs.download(bucket_name=BUCKET, object_name=obj, filename=local_path)
-            logging.info("✅ Downloaded: gs://%s/%s", BUCKET, obj)
-            return obj
-        except Exception as e:
-            last_err = e
-            logging.info("Not found at gs://%s/%s", BUCKET, obj)
-    raise FileNotFoundError(f"{filename} not found under {INPUT_DIRS}. Last error: {last_err}")
+            # Try PostgreSQL if MySQL fails
+            hook = PostgresHook(postgres_conn_id=conn_id)
+            df = hook.get_pandas_df(query)
+            logging.info(f"Successfully fetched data from PostgreSQL using connection: {conn_id}")
+            return df
+        except Exception as postgres_err:
+            logging.error(f"Failed to fetch data from both MySQL and PostgreSQL. MySQL error: {mysql_err}, PostgreSQL error: {postgres_err}")
+            raise
 
 def add_shifted_rolled_features(data: pd.DataFrame, date_col: str, granularity_cols: list,
                                 target_col: str, shifts: list, rolls: dict, compute_diffs: list = None):
@@ -69,7 +77,6 @@ def _to_cat(df: pd.DataFrame, cols):
 def run_feature_eng(**context):
     gcs = GCSHook(gcp_conn_id="google_cloud_default")
 
-    # data_prep çıktısı (istenirse dag_run.conf["prep_output"] ile override edilir)
     dag_run = context.get("dag_run")
     conf = dag_run.conf or {} if dag_run else {}
     prep_obj = conf.get("prep_output", DEFAULT_PREP_INPUT)
@@ -78,11 +85,16 @@ def run_feature_eng(**context):
     agg_local = "/tmp/weekly_sales_with_cluster_125.parquet"
     gcs.download(bucket_name=BUCKET, object_name=prep_obj, filename=agg_local)
 
-    # Takvim
-    cal_local = "/tmp/dim_calendar_pivot.parquet"
-    _download_first_found(gcs, "dim_calendar_pivot.parquet", cal_local)
+    # Database connection ID - using the same connection as other scripts
+    db_conn_id = "sporthink_mysql"
+    
+    # SQL query for dim_calendar
+    dim_calendar_query = "SELECT * FROM Genboost.dim_calendar"
+    
+    # Fetch calendar data from database
+    logging.info("Fetching dim_calendar data from database...")
+    calendar = _fetch_from_db(db_conn_id, dim_calendar_query)
 
-    # Okuma (gerekli kolonlar)
     cols_needed = [
         "week_start_date","total_quantity",
         "discount_frac_wavg","discount_frac_mean","unit_price_mean","unit_price_median",
@@ -92,9 +104,8 @@ def run_feature_eng(**context):
     ]
     df = pd.read_parquet(agg_local, columns=[c for c in cols_needed if c], engine=ENGINE)
     cal_cols = ["date","month","special_day_tag","ramazan_bayrami","kurban_bayrami","kara_cuma"]
-    calendar = pd.read_parquet(cal_local, columns=cal_cols, engine=ENGINE)
+    calendar = calendar[cal_cols]  # Select only needed columns
 
-    # Feature’lar
     df["week_start_date"] = pd.to_datetime(df["week_start_date"], errors="coerce")
     df["week_of_year"] = df["week_start_date"].dt.isocalendar().week.astype("int16")
     df.loc[df["total_quantity"] < 0, "total_quantity"] = 0
@@ -143,11 +154,9 @@ def run_feature_eng(**context):
     if "month" in df.columns:
         df["month"] = df["month"].astype("category")
 
-    # Çıkış
     out_local = "/tmp/weekly_sales_with_features.parquet"
     df.to_parquet(out_local, index=False, engine=ENGINE, compression="snappy")
     gcs.upload(bucket_name=BUCKET, object_name=FEATURE_OUTPUT_OBJ, filename=out_local)
-    logging.info("✅ Uploaded: gs://%s/%s", BUCKET, FEATURE_OUTPUT_OBJ)
 
     del df, calendar, calendar_weekly
     gc.collect()
